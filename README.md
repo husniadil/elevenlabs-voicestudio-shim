@@ -19,6 +19,7 @@ It listens on port 3900, VoiceStudio's own port, so a tool that calls VoiceStudi
 | `--voice` | the account's first voice | ElevenLabs voice name or id |
 | `--alias` | none | an extra profile name for `--voice`, for a tool that asks for one voice by a fixed name |
 | `--model` | `eleven_v4_turbo` | any ElevenLabs text-to-speech model |
+| `--music-model` | `music_v1` | the ElevenLabs music model for `/api/music/generate` |
 | `--port` | `3900` | |
 
 Every ElevenLabs voice on the account is listed under its own name too.
@@ -59,6 +60,20 @@ It is a middleware: VoiceStudio's request in, an ElevenLabs request out. The end
   download, and the limits above. It does not ask ElevenLabs: the key has already answered `/voices` at startup.
 
 Other VoiceStudio endpoints (dubbing, the OpenAI-compatible `/v1` API and the rest) are not served.
+
+### Background music, an extension
+
+VoiceStudio has no music endpoint. `POST /api/music/generate` is this shim's own, in the shape of `/api/sfx/generate`, so a
+client that already speaks the sound-effect API can ask for a music bed the same way. No VoiceStudio client calls it.
+
+- Takes JSON `prompt`, `duration`, `seed` and `instrumental`, asks ElevenLabs' `/v1/music` and answers
+  `{id, audio_url, duration_s, gen_time_s, seed, engine}`, the WAV served under `/audio` as sound effects are.
+- `duration` is 3 to 600 seconds, ElevenLabs' range, rounded to 0.1. Without it the model chooses a length.
+- `instrumental` defaults to `true` (ElevenLabs' `force_instrumental`). Set it to `false` to allow vocals.
+- ElevenLabs refuses a seed with a prompt, so `seed` is drawn when missing and handed back, and does not repeat a take.
+- The WAV is 16-bit stereo at 24 kHz, as ElevenLabs sends it.
+- Errors use the sound-effect shape with `music_prompt_required`, `music_bad_duration`, `music_busy` (503, retryable) and
+  `music_failed`.
 
 Each request costs ElevenLabs credits.
 

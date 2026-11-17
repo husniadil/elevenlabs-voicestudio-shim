@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // Stands in for the VoiceStudio app's local TTS and sound-effect API so a tool written for it uses ElevenLabs.
 //   ELEVENLABS_API_KEY=... node elevenlabs-voice.mjs [--port 3900] [--voice <name or id>] [--alias <name>] [--model eleven_v4_turbo]
+//                                                   [--music-model music_v1]
 // The endpoints follow VoiceStudio's backend (debpalash/VoiceStudio, backend/api/routers/profiles.py, generation.py, sfx.py):
 // GET /profiles lists the account's ElevenLabs voices as voice_profiles rows, plus --voice again under the name --alias.
 // POST /generate takes VoiceStudio's form and answers with audio/wav and its X-Audio-* and X-Seed headers.
 // GET /api/sfx/status says sound effects can run; POST /api/sfx/generate takes { prompt, duration, seed } and answers with
 // VoiceStudio's JSON; GET /audio/<file> serves the WAV.
+// POST /api/music/generate is not VoiceStudio's (it has no music): background music from ElevenLabs, in /api/sfx/generate's shape.
 import { randomInt, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -15,6 +17,7 @@ import path from "node:path";
 const args = process.argv.slice(2), opt = (k, d) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
 const KEY = process.env.ELEVENLABS_API_KEY, API = process.env.ELEVENLABS_API_URL ?? "https://api.elevenlabs.io/v1", RATE = 24000;
 const port = +opt("--port", 3900), model = opt("--model", "eleven_v4_turbo"), wanted = opt("--voice", null), alias = opt("--alias", null);
+const musicModel = opt("--music-model", "music_v1");
 if (!KEY) { console.error("FAILED set ELEVENLABS_API_KEY"); process.exit(1); }
 // VoiceStudio's MOSS-SoundEffect limits (backend/engines/moss_sfx/__init__.py)
 const SFX = { min: 1, max: 30, default: 10, maxPromptChars: 500, engine: "eleven_text_to_sound_v2" };
@@ -41,7 +44,7 @@ const row = (v, id = v.voice_id, name = v.name) => ({
 const profiles = [...(alias ? [row(main, "alias-" + main.voice_id, alias)] : []), ...voices.map(v => row(v))];
 const voiceOf = new Map(profiles.map(p => [p.id, p.id.replace(/^alias-/, "")]));
 
-// ElevenLabs' raw PCM is 16-bit: mono for speech, stereo for sound effects (checked against its wav_24000 answer)
+// ElevenLabs' raw PCM is 16-bit: mono for speech, stereo for sound effects and music (checked against its WAV and MP3 answers)
 const wav = (pcm, channels = 1) => {
   const h = Buffer.alloc(44);
   h.write("RIFF", 0); h.writeUInt32LE(36 + pcm.length, 4); h.write("WAVE", 8); h.write("fmt ", 12);
@@ -85,6 +88,40 @@ async function sfx(req, res) {
   console.log(`sound effect ${seconds} s: ${prompt.slice(0, 60)}`);
 }
 
+// POST /api/music/generate: { prompt, duration?, seed?, instrumental? } -> /api/sfx/generate's answer, with music_* error codes.
+// ElevenLabs' limits: 3 to 600 seconds, or no duration to let the model choose; it refuses a seed with a prompt.
+async function music(req, res) {
+  const send = (code, body, headers = {}) => { if (code >= 400) console.error(`${code} ${JSON.stringify(body)}`); res.writeHead(code, { "content-type": "application/json", ...headers }); res.end(JSON.stringify(body)); };
+  const fail = (code, err, message, headers) => send(code, { detail: { code: err, error: err, message } }, headers);
+  const invalid = (type, field, msg) => send(422, { detail: [{ type, loc: ["body", field], msg }] });
+  let body;
+  try { body = JSON.parse(await new Request("http://x", { method: "POST", headers: req.headers, body: req, duplex: "half" }).text()); } catch { return invalid("json_invalid", 0, "JSON decode error"); }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return invalid("model_attributes_type", "body", "Input should be a valid dictionary or object to extract fields from");
+  if (body.prompt === undefined) return invalid("missing", "prompt", "Field required");
+  if (typeof body.prompt !== "string") return invalid("string_type", "prompt", "Input should be a valid string");
+  if (body.seed != null && !(Number.isInteger(body.seed) && body.seed >= 0 && body.seed <= 2 ** 31 - 1)) return invalid("int_type", "seed", `Input should be an integer from 0 to ${2 ** 31 - 1}`);
+  if (body.instrumental !== undefined && typeof body.instrumental !== "boolean") return invalid("bool_type", "instrumental", "Input should be a valid boolean");
+  const prompt = body.prompt.split(/\s+/).filter(Boolean).join(" ");
+  if (!prompt) return fail(422, "music_prompt_required", "Describe the music you want first.");
+  const asked = body.duration == null ? null : Number(body.duration);
+  if (asked !== null && !(asked >= 3 && asked <= 600)) return fail(422, "music_bad_duration", "Duration must be between 3 and 600 seconds.");
+  const seed = body.seed ?? randomInt(2 ** 31), t0 = Date.now();
+  const t = await fetch(`${API}/music?output_format=pcm_${RATE}`, {
+    method: "POST", headers: { "xi-api-key": KEY, "content-type": "application/json" },
+    body: JSON.stringify({ prompt, model_id: musicModel, force_instrumental: body.instrumental ?? true, ...(asked === null ? {} : { music_length_ms: Math.round(asked * 10) * 100 }) }),
+  });
+  if (!t.ok) {
+    const upstream = `ElevenLabs answered ${t.status}: ${(await t.text()).slice(0, 300)}`;
+    if (t.status === 429 || t.status >= 500) return fail(503, "music_busy", upstream, { "Retry-After": "30", "X-OmniVoice-Retryable": "true" });
+    return fail(500, "music_failed", `Music generation failed. ${upstream}`);
+  }
+  const out = wav(Buffer.from(await t.arrayBuffer()), 2), id = randomUUID().replaceAll("-", "");
+  fs.writeFileSync(path.join(outputs, id + ".wav"), out);
+  const duration = Math.round((out.length - 44) / 4 / RATE * 100) / 100;
+  send(200, { id, audio_url: `/audio/${id}.wav`, duration_s: duration, gen_time_s: Math.round(Date.now() - t0) / 1000, seed, engine: musicModel });
+  console.log(`music ${duration} s: ${prompt.slice(0, 60)}`);
+}
+
 const server = http.createServer(async (req, res) => {
   // FastAPI's error shape; a busy upstream is VoiceStudio's retryable busy answer
   const fail = (code, detail, headers = {}) => { console.error(`${code} ${detail}`); res.writeHead(code, { "content-type": "application/json", ...headers }); res.end(JSON.stringify({ detail })); };
@@ -97,6 +134,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && req.url === "/api/sfx/status") { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify(sfxStatus)); }
     if (req.method === "POST" && req.url === "/api/sfx/generate") return await sfx(req, res);
+    if (req.method === "POST" && req.url === "/api/music/generate") return await music(req, res);
     if (req.method !== "POST" || req.url !== "/generate") return fail(404, "Not Found");
     const form = await new Request("http://x", { method: "POST", headers: req.headers, body: req, duplex: "half" }).formData();
     const text = form.get("text")?.normalize("NFC");

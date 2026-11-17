@@ -11,6 +11,13 @@ const fake = http.createServer((req, res) => {
     if (req.url === "/voices") return res.end(JSON.stringify({ voices: [{ voice_id: "v1", name: "Roger" }, { voice_id: "v2", name: "Sarah" }] }));
     if (req.url.startsWith("/text-to-speech/v1") && JSON.parse(body).text === "busy") { res.writeHead(429); return res.end("too many"); }
     if (req.url.startsWith("/text-to-speech/v")) return res.end(Buffer.alloc(4800)); // 0.1 s of 24 kHz 16-bit silence
+    if (req.url.startsWith("/music")) {
+      const m = JSON.parse(body);
+      if ("seed" in m) { res.writeHead(422); return res.end("`seed` cannot be used with `prompt`."); } // as ElevenLabs answers
+      if (m.prompt === "busy") { res.writeHead(429); return res.end("too many"); }
+      if (m.prompt === "refused") { res.writeHead(400); return res.end("bad prompt"); }
+      return res.end(Buffer.alloc(Math.round((m.music_length_ms ?? 30000) / 1000 * 24000) * 4)); // stereo, as ElevenLabs sends music
+    }
     if (req.url.startsWith("/sound-generation")) {
       const { text, duration_seconds } = JSON.parse(body);
       if (text === "busy") { res.writeHead(503); return res.end("overloaded"); }
@@ -141,4 +148,48 @@ test("sfx status has sfx.py's fields and says generation can run, without asking
     min_seconds: 1, max_seconds: 30, default_seconds: 10, max_prompt_chars: 500,
   });
   assert.equal(calls.length, before);
+});
+
+const music = body => fetch(url + "/api/music/generate", { method: "POST", headers: { "content-type": "application/json" }, body: typeof body === "string" ? body : JSON.stringify(body) });
+const lastMusic = () => calls.filter(c => c.url.startsWith("/music")).at(-1);
+
+test("music answers in /api/sfx/generate's shape, instrumental, and its audio_url serves a stereo WAV", async () => {
+  const r = await music({ prompt: " calm\n piano bed ", duration: 4.04, seed: 9 });
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.deepEqual(Object.keys(j), ["id", "audio_url", "duration_s", "gen_time_s", "seed", "engine"]);
+  assert.equal(j.audio_url, `/audio/${j.id}.wav`); assert.equal(j.duration_s, 4); assert.equal(j.seed, 9); assert.equal(j.engine, "music_v1");
+  const call = lastMusic();
+  assert.equal(call.url, "/music?output_format=pcm_24000"); assert.equal(call.key, "k");
+  assert.deepEqual(call.body, { prompt: "calm piano bed", model_id: "music_v1", force_instrumental: true, music_length_ms: 4000 });
+  const b = Buffer.from(await (await fetch(url + j.audio_url)).arrayBuffer());
+  assert.equal(b.readUInt16LE(22), 2); assert.equal(b.length, 44 + 4 * 24000 * 4);
+});
+
+test("music with no duration lets ElevenLabs choose, and instrumental: false is passed on", async () => {
+  const j = await (await music({ prompt: "a song", instrumental: false })).json();
+  assert.deepEqual(lastMusic().body, { prompt: "a song", model_id: "music_v1", force_instrumental: false });
+  assert.equal(j.duration_s, 30); assert.ok(Number.isInteger(j.seed));
+});
+
+test("music refuses a bad request before ElevenLabs is asked", async () => {
+  const before = calls.length, code = async (body, status) => { const r = await music(body); assert.equal(r.status, status); return (await r.json()).detail; };
+  assert.equal((await code({ duration: 10 }, 422))[0].loc.join("."), "body.prompt");
+  assert.equal((await code("[1]", 422))[0].type, "model_attributes_type");
+  assert.equal((await code({ prompt: "x", seed: 1.5 }, 422))[0].loc.join("."), "body.seed");
+  assert.equal((await code({ prompt: "x", instrumental: "yes" }, 422))[0].loc.join("."), "body.instrumental");
+  assert.equal((await code({ prompt: "\t" }, 422)).code, "music_prompt_required");
+  assert.equal((await code({ prompt: "x", duration: 2.9 }, 422)).code, "music_bad_duration");
+  assert.equal((await code({ prompt: "x", duration: 600.1 }, 422)).code, "music_bad_duration");
+  assert.equal(calls.length, before);
+});
+
+test("music turns a busy ElevenLabs into a retryable 503 and a refusal into music_failed", async () => {
+  const busy = await music({ prompt: "busy", duration: 3 });
+  assert.equal(busy.status, 503); assert.equal(busy.headers.get("x-omnivoice-retryable"), "true");
+  assert.equal((await busy.json()).detail.code, "music_busy");
+  const refused = await music({ prompt: "refused", duration: 3 });
+  assert.equal(refused.status, 500);
+  const d = (await refused.json()).detail;
+  assert.equal(d.code, "music_failed"); assert.match(d.message, /400: bad prompt/);
 });
