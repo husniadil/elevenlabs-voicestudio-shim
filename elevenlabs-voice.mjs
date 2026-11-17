@@ -7,7 +7,8 @@
 // POST /generate takes VoiceStudio's form and answers with audio/wav and its X-Audio-* and X-Seed headers.
 // GET /api/sfx/status says sound effects can run; POST /api/sfx/generate takes { prompt, duration, seed } and answers with
 // VoiceStudio's JSON; GET /audio/<file> serves the WAV.
-// POST /api/music/generate is not VoiceStudio's (it has no music): background music from ElevenLabs, in /api/sfx/generate's shape.
+// POST /api/music/generate and GET /api/music/status are not VoiceStudio's (it has no music): background music from ElevenLabs,
+// in the shape of /api/sfx/generate and /api/sfx/status.
 import { randomInt, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -18,6 +19,12 @@ const args = process.argv.slice(2), opt = (k, d) => (args.includes(k) ? args[arg
 const KEY = process.env.ELEVENLABS_API_KEY, API = process.env.ELEVENLABS_API_URL ?? "https://api.elevenlabs.io/v1", RATE = 24000;
 const port = +opt("--port", 3900), model = opt("--model", "eleven_v4_turbo"), wanted = opt("--voice", null), alias = opt("--alias", null);
 const musicModel = opt("--music-model", "music_v1");
+// /api/sfx/status's fields for /api/music/generate: no default length (the model chooses) and no prompt limit of its own
+const musicStatus = () => ({
+  engine_id: musicModel, installed: true, available: true, supported: true, reason: null, reason_code: null, install_allowed: true,
+  download_bytes: 0, license: "ElevenLabs Terms of Service", model_repo: musicModel,
+  min_seconds: 3, max_seconds: 600, default_seconds: null, max_prompt_chars: null,
+});
 if (!KEY) { console.error("FAILED set ELEVENLABS_API_KEY"); process.exit(1); }
 // VoiceStudio's MOSS-SoundEffect limits (backend/engines/moss_sfx/__init__.py)
 const SFX = { min: 1, max: 30, default: 10, maxPromptChars: 500, engine: "eleven_text_to_sound_v2" };
@@ -134,6 +141,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && req.url === "/api/sfx/status") { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify(sfxStatus)); }
     if (req.method === "POST" && req.url === "/api/sfx/generate") return await sfx(req, res);
+    if (req.method === "GET" && req.url === "/api/music/status") { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify(musicStatus())); }
     if (req.method === "POST" && req.url === "/api/music/generate") return await music(req, res);
     if (req.method !== "POST" || req.url !== "/generate") return fail(404, "Not Found");
     const form = await new Request("http://x", { method: "POST", headers: req.headers, body: req, duplex: "half" }).formData();

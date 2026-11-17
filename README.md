@@ -74,6 +74,8 @@ client that already speaks the sound-effect API can ask for a music bed the same
 - The WAV is 16-bit stereo at 24 kHz, as ElevenLabs sends it.
 - Errors use the sound-effect shape with `music_prompt_required`, `music_bad_duration`, `music_busy` (503, retryable) and
   `music_failed`.
+- `GET /api/music/status` answers in `/api/sfx/status`'s shape: installed and available, `min_seconds` 3, `max_seconds` 600,
+  and `default_seconds` and `max_prompt_chars` `null`, since the model chooses a length and the shim sets no prompt limit.
 
 Each request costs ElevenLabs credits.
 

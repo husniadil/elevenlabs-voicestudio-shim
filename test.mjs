@@ -193,3 +193,14 @@ test("music turns a busy ElevenLabs into a retryable 503 and a refusal into musi
   const d = (await refused.json()).detail;
   assert.equal(d.code, "music_failed"); assert.match(d.message, /400: bad prompt/);
 });
+
+test("music status has /api/sfx/status's fields with music's limits, without asking ElevenLabs", async () => {
+  const before = calls.length, [m, sfxStatus] = await Promise.all(["/api/music/status", "/api/sfx/status"].map(async p => (await fetch(url + p)).json()));
+  assert.deepEqual(Object.keys(m), Object.keys(sfxStatus));
+  assert.deepEqual(m, {
+    engine_id: "music_v1", installed: true, available: true, supported: true, reason: null, reason_code: null,
+    install_allowed: true, download_bytes: 0, license: "ElevenLabs Terms of Service", model_repo: "music_v1",
+    min_seconds: 3, max_seconds: 600, default_seconds: null, max_prompt_chars: null,
+  });
+  assert.equal(calls.length, before);
+});
