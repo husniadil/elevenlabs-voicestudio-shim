@@ -1,0 +1,10 @@
+{
+  "name": "elevenlabs-voicestudio-shim",
+  "version": "0.1.0",
+  "description": "A local server that speaks VoiceStudio's API with ElevenLabs voices, for tools written for VoiceStudio.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "elevenlabs-voice": "elevenlabs-voice.mjs" },
+  "scripts": { "start": "node elevenlabs-voice.mjs", "test": "node --test test.mjs" },
+  "engines": { "node": ">=22" }
+}
