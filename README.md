@@ -55,7 +55,10 @@ It is a middleware: VoiceStudio's request in, an ElevenLabs request out. The end
   - A rate-limited or failing ElevenLabs answers 503 `sfx_busy`, retryable. Any other ElevenLabs error is a 500 `sfx_failed`
     whose message carries ElevenLabs' answer.
 
-Other VoiceStudio endpoints (`/api/sfx/status`, dubbing, the OpenAI-compatible `/v1` API and the rest) are not served.
+- `GET /api/sfx/status` answers with `sfx.py`'s status fields: installed, available and supported, no reason, nothing to
+  download, and the limits above. It does not ask ElevenLabs: the key has already answered `/voices` at startup.
+
+Other VoiceStudio endpoints (dubbing, the OpenAI-compatible `/v1` API and the rest) are not served.
 
 Each request costs ElevenLabs credits.
 

@@ -4,7 +4,8 @@
 // The endpoints follow VoiceStudio's backend (debpalash/VoiceStudio, backend/api/routers/profiles.py, generation.py, sfx.py):
 // GET /profiles lists the account's ElevenLabs voices as voice_profiles rows, plus --voice again under the name --alias.
 // POST /generate takes VoiceStudio's form and answers with audio/wav and its X-Audio-* and X-Seed headers.
-// POST /api/sfx/generate takes { prompt, duration, seed } and answers with VoiceStudio's JSON; GET /audio/<file> serves the WAV.
+// GET /api/sfx/status says sound effects can run; POST /api/sfx/generate takes { prompt, duration, seed } and answers with
+// VoiceStudio's JSON; GET /audio/<file> serves the WAV.
 import { randomInt, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -17,6 +18,12 @@ const port = +opt("--port", 3900), model = opt("--model", "eleven_v4_turbo"), wa
 if (!KEY) { console.error("FAILED set ELEVENLABS_API_KEY"); process.exit(1); }
 // VoiceStudio's MOSS-SoundEffect limits (backend/engines/moss_sfx/__init__.py)
 const SFX = { min: 1, max: 30, default: 10, maxPromptChars: 500, engine: "eleven_text_to_sound_v2" };
+// sfx.py's _status(): nothing to install here, and the key already answered /voices at startup, so generation can run
+const sfxStatus = {
+  engine_id: SFX.engine, installed: true, available: true, supported: true, reason: null, reason_code: null, install_allowed: true,
+  download_bytes: 0, license: "ElevenLabs Terms of Service", model_repo: SFX.engine,
+  min_seconds: SFX.min, max_seconds: SFX.max, default_seconds: SFX.default, max_prompt_chars: SFX.maxPromptChars,
+};
 const outputs = fs.mkdtempSync(path.join(os.tmpdir(), "elevenlabs-voicestudio-shim-"));
 
 const r = await fetch(API + "/voices", { headers: { "xi-api-key": KEY } });
@@ -88,6 +95,7 @@ const server = http.createServer(async (req, res) => {
       if (!fs.existsSync(file)) return fail(404, "Not Found");
       res.writeHead(200, { "content-type": "audio/wav" }); return fs.createReadStream(file).pipe(res);
     }
+    if (req.method === "GET" && req.url === "/api/sfx/status") { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify(sfxStatus)); }
     if (req.method === "POST" && req.url === "/api/sfx/generate") return await sfx(req, res);
     if (req.method !== "POST" || req.url !== "/generate") return fail(404, "Not Found");
     const form = await new Request("http://x", { method: "POST", headers: req.headers, body: req, duplex: "half" }).formData();

@@ -131,3 +131,14 @@ test("/audio serves only a take this server made", async () => {
   assert.equal((await fetch(url + "/audio/" + "0".repeat(32) + ".wav")).status, 404);
   assert.equal((await fetch(url + "/audio/..%2Fetc%2Fpasswd")).status, 404);
 });
+
+test("sfx status has sfx.py's fields and says generation can run, without asking ElevenLabs", async () => {
+  const before = calls.length, r = await fetch(url + "/api/sfx/status");
+  assert.equal(r.status, 200);
+  assert.deepEqual(await r.json(), {
+    engine_id: "eleven_text_to_sound_v2", installed: true, available: true, supported: true, reason: null, reason_code: null,
+    install_allowed: true, download_bytes: 0, license: "ElevenLabs Terms of Service", model_repo: "eleven_text_to_sound_v2",
+    min_seconds: 1, max_seconds: 30, default_seconds: 10, max_prompt_chars: 500,
+  });
+  assert.equal(calls.length, before);
+});
