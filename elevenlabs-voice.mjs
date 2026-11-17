@@ -44,6 +44,8 @@ const server = http.createServer(async (req, res) => {
     const form = await new Request("http://x", { method: "POST", headers: req.headers, body: req, duplex: "half" }).formData();
     const text = form.get("text")?.normalize("NFC");
     if (!text) return fail(422, "text is required");
+    // VoiceStudio streams NDJSON events here; answering with a WAV would hand that client the wrong format
+    if (["true", "1", "yes", "on"].includes(String(form.get("stream") ?? "").toLowerCase())) return fail(422, "stream=true is not supported: this shim answers with a WAV only");
     // VoiceStudio ignores a profile_id it does not have and speaks with its default voice; here that is --voice
     const asked = form.get("profile_id"), voice = voiceOf.get(asked) ?? main.voice_id;
     if (asked && !voiceOf.has(asked)) console.error(`profile_id "${asked}" is not a voice here; speaking with "${main.name}"`);

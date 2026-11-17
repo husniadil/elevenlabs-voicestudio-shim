@@ -54,6 +54,16 @@ test("a missing or unknown profile_id speaks with --voice, as VoiceStudio uses i
   assert.equal((await generate({ text: "Halo", profile_id: "nope" })).status, 200); assert.match(lastTts().url, /^\/text-to-speech\/v2\?/);
 });
 
+test("stream=true is refused with a 422 before ElevenLabs is asked, stream=false speaks", async () => {
+  const before = calls.length;
+  for (const stream of ["true", "1", "on", "True"]) {
+    const r = await generate({ text: "Halo", stream });
+    assert.equal(r.status, 422); assert.match((await r.json()).detail, /stream=true is not supported/);
+  }
+  assert.equal(calls.length, before);
+  assert.equal((await generate({ text: "Halo", stream: "false" })).status, 200);
+});
+
 test("errors come back in FastAPI's shape, a busy ElevenLabs as a retryable 429", async () => {
   const empty = await generate({ text: "" });
   assert.equal(empty.status, 422); assert.deepEqual(await empty.json(), { detail: "text is required" });

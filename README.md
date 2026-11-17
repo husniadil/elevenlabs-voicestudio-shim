@@ -36,8 +36,9 @@ It is a middleware: VoiceStudio's request in, an ElevenLabs request out. The two
     speaks with its default voice.
   - `seed` is passed to ElevenLabs. Without one a seed is drawn and returned in `X-Seed`, as VoiceStudio does.
   - `speed` is passed as ElevenLabs' `voice_settings.speed`, kept within its 0.7 to 1.2.
-  - Every other VoiceStudio field (`language`, `instruct`, `ref_audio`, `guidance_scale`, `num_step`, `stream` and the
-    rest) is accepted and ignored. ElevenLabs detects the language from the text.
+  - `stream=true` is refused with a 422. VoiceStudio streams NDJSON events for it, and this shim answers with a WAV only.
+  - Every other VoiceStudio field (`language`, `instruct`, `ref_audio`, `guidance_scale`, `num_step` and the rest) is
+    accepted and ignored. ElevenLabs detects the language from the text.
 - Errors come back as `{"detail": "..."}`. A rate-limited or failing ElevenLabs answers 429 or 503 with `Retry-After: 30`
   and `X-OmniVoice-Retryable: true`, VoiceStudio's busy answer. Any other ElevenLabs error is a 502.
 
