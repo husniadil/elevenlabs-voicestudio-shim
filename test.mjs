@@ -11,6 +11,12 @@ const fake = http.createServer((req, res) => {
     if (req.url === "/voices") return res.end(JSON.stringify({ voices: [{ voice_id: "v1", name: "Roger" }, { voice_id: "v2", name: "Sarah" }] }));
     if (req.url.startsWith("/text-to-speech/v1") && JSON.parse(body).text === "busy") { res.writeHead(429); return res.end("too many"); }
     if (req.url.startsWith("/text-to-speech/v")) return res.end(Buffer.alloc(4800)); // 0.1 s of 24 kHz 16-bit silence
+    if (req.url.startsWith("/sound-generation")) {
+      const { text, duration_seconds } = JSON.parse(body);
+      if (text === "busy") { res.writeHead(503); return res.end("overloaded"); }
+      if (text === "refused") { res.writeHead(401); return res.end("invalid api key"); }
+      return res.end(Buffer.alloc(Math.round(duration_seconds * 24000) * 4)); // stereo, as ElevenLabs sends sound effects
+    }
     res.writeHead(500); res.end("unexpected");
   });
 });
@@ -70,4 +76,58 @@ test("errors come back in FastAPI's shape, a busy ElevenLabs as a retryable 429"
   const busy = await generate({ text: "busy", profile_id: "v1" });
   assert.equal(busy.status, 429); assert.equal(busy.headers.get("x-omnivoice-retryable"), "true"); assert.equal(busy.headers.get("retry-after"), "30");
   assert.match((await busy.json()).detail, /429: too many/);
+});
+
+const sfx = body => fetch(url + "/api/sfx/generate", { method: "POST", headers: { "content-type": "application/json" }, body: typeof body === "string" ? body : JSON.stringify(body) });
+const lastSfx = () => calls.filter(c => c.url.startsWith("/sound-generation")).at(-1);
+
+test("sfx answers with VoiceStudio's JSON and its audio_url serves the WAV", async () => {
+  const r = await sfx({ prompt: "  rain on a\n tin roof ", duration: 2.04, seed: 11 });
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.deepEqual(Object.keys(j), ["id", "audio_url", "duration_s", "gen_time_s", "seed", "engine"]);
+  assert.match(j.id, /^[0-9a-f]{32}$/); assert.equal(j.audio_url, `/audio/${j.id}.wav`);
+  assert.equal(j.duration_s, 2); assert.equal(j.seed, 11); assert.equal(j.engine, "eleven_text_to_sound_v2"); assert.equal(typeof j.gen_time_s, "number");
+  const call = lastSfx();
+  assert.equal(call.url, "/sound-generation?output_format=pcm_24000"); assert.equal(call.key, "k");
+  assert.deepEqual(call.body, { text: "rain on a tin roof", duration_seconds: 2, model_id: "eleven_text_to_sound_v2" });
+  const a = await fetch(url + j.audio_url);
+  assert.equal(a.status, 200); assert.equal(a.headers.get("content-type"), "audio/wav");
+  const b = Buffer.from(await a.arrayBuffer());
+  assert.equal(b.toString("ascii", 0, 4), "RIFF"); assert.equal(b.readUInt16LE(22), 2); assert.equal(b.readUInt32LE(28), 24000 * 4); assert.equal(b.length, 44 + 2 * 24000 * 4);
+});
+
+test("sfx defaults to 10 s and draws a seed when none is given", async () => {
+  const j = await (await sfx({ prompt: "door slam" })).json();
+  assert.equal(lastSfx().body.duration_seconds, 10); assert.equal(j.duration_s, 10);
+  assert.ok(Number.isInteger(j.seed) && j.seed >= 0 && j.seed < 2 ** 31);
+});
+
+test("sfx refuses a bad request as VoiceStudio does, before ElevenLabs is asked", async () => {
+  const before = calls.length, code = async (body, status) => { const r = await sfx(body); assert.equal(r.status, status); return (await r.json()).detail; };
+  assert.equal((await code({ duration: 3 }, 422))[0].loc.join("."), "body.prompt");
+  assert.equal((await code("{not json", 422))[0].type, "json_invalid");
+  assert.equal((await code({ prompt: "x", seed: -1 }, 422))[0].loc.join("."), "body.seed");
+  assert.equal((await code({ prompt: "x", seed: 2 ** 31 }, 422))[0].loc.join("."), "body.seed");
+  assert.deepEqual(await code({ prompt: " \n " }, 422), { code: "sfx_prompt_required", error: "sfx_prompt_required", message: "Describe the sound you want first." });
+  assert.equal((await code({ prompt: "x".repeat(501) }, 422)).code, "sfx_prompt_too_long");
+  assert.equal((await code({ prompt: "x", duration: 0.9 }, 422)).code, "sfx_bad_duration");
+  assert.equal((await code({ prompt: "x", duration: 30.1 }, 422)).code, "sfx_bad_duration");
+  assert.equal(calls.length, before);
+  assert.equal((await sfx({ prompt: "x".repeat(500), duration: 30 })).status, 200);
+});
+
+test("sfx turns a busy ElevenLabs into a retryable 503 and a refusal into sfx_failed", async () => {
+  const busy = await sfx({ prompt: "busy", duration: 1 });
+  assert.equal(busy.status, 503); assert.equal(busy.headers.get("x-omnivoice-retryable"), "true"); assert.equal(busy.headers.get("retry-after"), "30");
+  assert.equal((await busy.json()).detail.code, "sfx_busy");
+  const refused = await sfx({ prompt: "refused", duration: 1 });
+  assert.equal(refused.status, 500);
+  const d = (await refused.json()).detail;
+  assert.equal(d.code, "sfx_failed"); assert.match(d.message, /401: invalid api key/);
+});
+
+test("/audio serves only a take this server made", async () => {
+  assert.equal((await fetch(url + "/audio/" + "0".repeat(32) + ".wav")).status, 404);
+  assert.equal((await fetch(url + "/audio/..%2Fetc%2Fpasswd")).status, 404);
 });
