@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Stands in for the VoiceStudio app's local TTS and sound-effect API so a tool written for it uses ElevenLabs.
 //   ELEVENLABS_API_KEY=... node elevenlabs-voice.mjs [--port 3900] [--voice <name or id>] [--alias <name>] [--model eleven_v4_turbo]
-//                                                   [--music-model music_v1]
+//                                                   [--language <code or name>] [--music-model music_v1]
 // The endpoints follow VoiceStudio's backend (debpalash/VoiceStudio, backend/api/routers/profiles.py, generation.py, sfx.py):
 // GET /profiles lists the account's ElevenLabs voices as voice_profiles rows, plus --voice again under the name --alias.
 // POST /generate takes VoiceStudio's form and answers with audio/wav and its X-Audio-* and X-Seed headers.
@@ -18,7 +18,7 @@ import path from "node:path";
 const args = process.argv.slice(2), opt = (k, d) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
 const KEY = process.env.ELEVENLABS_API_KEY, API = process.env.ELEVENLABS_API_URL ?? "https://api.elevenlabs.io/v1", RATE = 24000;
 const port = +opt("--port", 3900), model = opt("--model", "eleven_v4_turbo"), wanted = opt("--voice", null), alias = opt("--alias", null);
-const musicModel = opt("--music-model", "music_v1");
+const musicModel = opt("--music-model", "music_v1"), languageFlag = opt("--language", null);
 // /api/sfx/status's fields for /api/music/generate: no default length (the model chooses) and no prompt limit of its own
 const musicStatus = () => ({
   engine_id: musicModel, installed: true, available: true, supported: true, reason: null, reason_code: null, install_allowed: true,
@@ -49,6 +49,30 @@ const row = (v, id = v.voice_id, name = v.name) => ({
   consent_basis: "", consent_attested_at: null, image_url: null, audio_url: null,
 });
 const profiles = [...(alias ? [row(main, "alias-" + main.voice_id, alias)] : []), ...voices.map(v => row(v))];
+
+// VoiceStudio's language field takes a name ("Indonesian"), its id ("id"), a regional code ("pt-BR") or "Auto"
+// (docs/languages.md). ElevenLabs takes an ISO 639-1 language_code, from the model's own list.
+const m = await fetch(API + "/models", { headers: { "xi-api-key": KEY } });
+if (!m.ok) { console.error(`FAILED ElevenLabs /models answered ${m.status}: ${(await m.text()).slice(0, 300)}`); process.exit(1); }
+const ttsModel = (await m.json()).find(x => x.model_id === model);
+if (!ttsModel) { console.error(`FAILED no ElevenLabs model "${model}"`); process.exit(1); }
+const langIds = new Set(ttsModel.languages.map(l => l.language_id)), langNames = new Map(ttsModel.languages.map(l => [l.name.toLowerCase(), l.language_id]));
+// VoiceStudio's picker codes and names that ElevenLabs spells differently (electron/src/shared/utils/languages.js)
+const LANG_ALIASES = { jw: "jv", cmn: "zh", chinese: "zh", kyrgyz: "ky" };
+// null: Auto, nothing pinned. undefined: a language this model does not speak.
+const languageCode = value => {
+  const v = String(value ?? "").trim().toLowerCase();
+  if (!v || v === "auto") return null;
+  for (const k of [v, v.split("-")[0], v.replace(/\s*\(.*\)$/, "")]) {
+    const a = LANG_ALIASES[k] ?? k;
+    if (langIds.has(a)) return a;
+    if (langNames.has(a)) return langNames.get(a);
+  }
+};
+const defaultLanguage = languageCode(languageFlag);
+if (languageFlag && !defaultLanguage) { console.error(`FAILED ElevenLabs model "${model}" does not speak "${languageFlag}"; it speaks: ${[...langIds].join(", ")}`); process.exit(1); }
+// ElevenLabs does not take language_code on its multilingual v2 model
+const takesLanguage = model !== "eleven_multilingual_v2";
 const voiceOf = new Map(profiles.map(p => [p.id, p.id.replace(/^alias-/, "")]));
 
 // ElevenLabs' raw PCM is 16-bit: mono for speech, stereo for sound effects and music (checked against its WAV and MP3 answers)
@@ -150,13 +174,17 @@ const server = http.createServer(async (req, res) => {
     // VoiceStudio streams NDJSON events here; answering with a WAV would hand that client the wrong format
     if (["true", "1", "yes", "on"].includes(String(form.get("stream") ?? "").toLowerCase())) return fail(422, "stream=true is not supported: this shim answers with a WAV only");
     // VoiceStudio ignores a profile_id it does not have and speaks with its default voice; here that is --voice
+    // VoiceStudio refuses a language its engine does not speak with a 400 rather than speak in another one
+    const askedLanguage = form.get("language"), language = languageCode(askedLanguage);
+    if (language === undefined) return fail(400, `ElevenLabs model ${model} does not support language '${askedLanguage}'. Supported: ${[...langIds].join(", ")}`);
+    const languageSent = takesLanguage ? language ?? defaultLanguage : null;
     const asked = form.get("profile_id"), voice = voiceOf.get(asked) ?? main.voice_id;
     if (asked && !voiceOf.has(asked)) console.error(`profile_id "${asked}" is not a voice here; speaking with "${main.name}"`);
     const seedIn = Number.parseInt(form.get("seed"), 10), seed = Number.isInteger(seedIn) && seedIn >= 0 ? seedIn : randomInt(2 ** 31);
     const speed = Math.min(1.2, Math.max(0.7, +form.get("speed") || 1)), t0 = Date.now();
     const t = await fetch(`${API}/text-to-speech/${encodeURIComponent(voice)}?output_format=pcm_${RATE}`, {
       method: "POST", headers: { "xi-api-key": KEY, "content-type": "application/json" },
-      body: JSON.stringify({ text, model_id: model, voice_settings: { speed }, seed }),
+      body: JSON.stringify({ text, model_id: model, voice_settings: { speed }, seed, ...(languageSent ? { language_code: languageSent } : {}) }),
     });
     if (!t.ok) {
       const detail = `ElevenLabs answered ${t.status}: ${(await t.text()).slice(0, 300)}`;
@@ -171,4 +199,4 @@ const server = http.createServer(async (req, res) => {
     res.end(out);
     console.log(`spoke ${text.length} chars (${seconds.toFixed(2)} s)`);
   } catch (e) { fail(500, e.message); }
-}).listen(port, () => console.log(`elevenlabs-voice: http://localhost:${server.address().port}, voice "${main.name}" (${main.voice_id})${alias ? ` as "${alias}"` : ""}, model ${model}`));
+}).listen(port, () => console.log(`elevenlabs-voice: http://localhost:${server.address().port}, voice "${main.name}" (${main.voice_id})${alias ? ` as "${alias}"` : ""}, model ${model}${defaultLanguage ? `, Auto speaks ${defaultLanguage}` : ""}`));

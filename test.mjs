@@ -9,6 +9,10 @@ const fake = http.createServer((req, res) => {
   let body = ""; req.on("data", d => (body += d)).on("end", () => {
     calls.push({ url: req.url, key: req.headers["xi-api-key"], body: body && JSON.parse(body) });
     if (req.url === "/voices") return res.end(JSON.stringify({ voices: [{ voice_id: "v1", name: "Roger" }, { voice_id: "v2", name: "Sarah" }] }));
+    if (req.url === "/models") return res.end(JSON.stringify([{ model_id: "eleven_v4_turbo", languages: [
+      { language_id: "en", name: "English" }, { language_id: "id", name: "Indonesian" }, { language_id: "pt", name: "Portuguese" },
+      { language_id: "zh", name: "Mandarin Chinese" }, { language_id: "jv", name: "Javanese" }, { language_id: "ky", name: "Kirghiz" },
+    ] }, { model_id: "eleven_multilingual_v2", languages: [{ language_id: "id", name: "Indonesian" }] }]));
     if (req.url.startsWith("/text-to-speech/v1") && JSON.parse(body).text === "busy") { res.writeHead(429); return res.end("too many"); }
     if (req.url.startsWith("/text-to-speech/v")) return res.end(Buffer.alloc(4800)); // 0.1 s of 24 kHz 16-bit silence
     if (req.url.startsWith("/music")) {
@@ -27,14 +31,21 @@ const fake = http.createServer((req, res) => {
     res.writeHead(500); res.end("unexpected");
   });
 });
-let shim, url;
+const shims = [];
+// Starts a shim on the fake; resolves with its URL, or rejects with its stderr when it exits
+const start = (...args) => new Promise((ok, no) => {
+  const p = spawn(process.execPath, ["elevenlabs-voice.mjs", "--port", "0", ...args], { env: { ...process.env, ELEVENLABS_API_KEY: "k", ELEVENLABS_API_URL: `http://localhost:${fake.address().port}` } });
+  shims.push(p); let out = "", err = "";
+  p.stdout.on("data", d => { out += d; const m = out.match(/http:\/\/localhost:\d+/); if (m) ok(m[0]); });
+  p.stderr.on("data", d => (err += d)); p.once("exit", c => no(new Error(`shim exited ${c}: ${err}`)));
+});
+let url;
 
 before(async () => {
   await new Promise(ok => fake.listen(0, ok));
-  shim = spawn(process.execPath, ["elevenlabs-voice.mjs", "--port", "0", "--voice", "Sarah", "--alias", "Narrator"], { env: { ...process.env, ELEVENLABS_API_KEY: "k", ELEVENLABS_API_URL: `http://localhost:${fake.address().port}` } });
-  url = await new Promise((ok, no) => { let s = ""; shim.stdout.on("data", d => { s += d; const m = s.match(/http:\/\/localhost:\d+/); if (m) ok(m[0]); }); shim.once("exit", c => no(new Error("shim exited " + c))); });
+  url = await start("--voice", "Sarah", "--alias", "Narrator");
 });
-after(() => { shim.kill(); fake.close(); });
+after(() => { shims.forEach(p => p.kill()); fake.close(); });
 
 const generate = fields => fetch(url + "/generate", { method: "POST", body: Object.entries(fields).reduce((f, [k, v]) => (f.append(k, v), f), new FormData()) });
 const lastTts = () => calls.filter(c => c.url.startsWith("/text-to-speech/")).at(-1);
@@ -203,4 +214,42 @@ test("music status has /api/sfx/status's fields with music's limits, without ask
     min_seconds: 3, max_seconds: 600, default_seconds: null, max_prompt_chars: null,
   });
   assert.equal(calls.length, before);
+});
+
+const generateAt = (base, fields) => fetch(base + "/generate", { method: "POST", body: Object.entries(fields).reduce((f, [k, v]) => (f.append(k, v), f), new FormData()) });
+
+test("language is passed as ElevenLabs' language_code, from each form VoiceStudio accepts", async () => {
+  for (const [language, code] of [["id", "id"], ["Indonesian", "id"], [" indonesian ", "id"], ["pt-BR", "pt"], ["Portuguese (Brazil)", "pt"],
+    ["jw", "jv"], ["cmn-Hans", "zh"], ["Chinese (Traditional)", "zh"], ["Kyrgyz", "ky"]]) {
+    assert.equal((await generate({ text: "Halo", language })).status, 200, language);
+    assert.equal(lastTts().body.language_code, code, language);
+  }
+  for (const language of ["Auto", "auto", ""]) {
+    assert.equal((await generate({ text: "Halo", language })).status, 200);
+    assert.equal("language_code" in lastTts().body, false, `"${language}" without --language sends no language_code`);
+  }
+});
+
+test("a language the model does not speak is a 400, as VoiceStudio refuses it, before ElevenLabs is asked", async () => {
+  const before = calls.length, r = await generate({ text: "Halo", language: "Sundanese" });
+  assert.equal(r.status, 400); assert.match((await r.json()).detail, /does not support language 'Sundanese'.*Supported: en, id/);
+  assert.equal(calls.length, before);
+});
+
+test("--language is what Auto speaks, and an explicit language still wins", async () => {
+  const base = await start("--voice", "Sarah", "--language", "Indonesian");
+  for (const fields of [{ text: "Halo" }, { text: "Halo", language: "Auto" }, { text: "Halo", profile_id: "v1", language: "auto" }]) {
+    assert.equal((await generateAt(base, fields)).status, 200); assert.equal(lastTts().body.language_code, "id");
+  }
+  assert.equal((await generateAt(base, { text: "Hello", language: "English" })).status, 200); assert.equal(lastTts().body.language_code, "en");
+});
+
+test("the shim will not start on a --language its model does not speak", async () => {
+  await assert.rejects(start("--language", "Sundanese"), /does not speak "Sundanese"; it speaks: en, id/);
+});
+
+test("on eleven_multilingual_v2, which takes no language_code, none is sent", async () => {
+  const base = await start("--model", "eleven_multilingual_v2", "--language", "id");
+  assert.equal((await generateAt(base, { text: "Halo", language: "Indonesian" })).status, 200);
+  assert.equal(lastTts().body.model_id, "eleven_multilingual_v2"); assert.equal("language_code" in lastTts().body, false);
 });

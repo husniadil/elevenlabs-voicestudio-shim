@@ -19,6 +19,7 @@ It listens on port 3900, VoiceStudio's own port, so a tool that calls VoiceStudi
 | `--voice` | the account's first voice | ElevenLabs voice name or id |
 | `--alias` | none | an extra profile name for `--voice`, for a tool that asks for one voice by a fixed name |
 | `--model` | `eleven_v4_turbo` | any ElevenLabs text-to-speech model |
+| `--language` | none | the language `Auto` speaks, as a code (`id`) or a name (`Indonesian`). Without it, ElevenLabs detects the language from the text |
 | `--music-model` | `music_v1` | the ElevenLabs music model for `/api/music/generate` |
 | `--port` | `3900` | |
 
@@ -39,8 +40,14 @@ It is a middleware: VoiceStudio's request in, an ElevenLabs request out. The end
   - `seed` is passed to ElevenLabs. Without one a seed is drawn and returned in `X-Seed`, as VoiceStudio does.
   - `speed` is passed as ElevenLabs' `voice_settings.speed`, kept within its 0.7 to 1.2.
   - `stream=true` is refused with a 422. VoiceStudio streams NDJSON events for it, and this shim answers with a WAV only.
-  - Every other VoiceStudio field (`language`, `instruct`, `ref_audio`, `guidance_scale`, `num_step` and the rest) is
-    accepted and ignored. ElevenLabs detects the language from the text.
+  - `language` takes what VoiceStudio takes (`docs/languages.md`): a name (`Indonesian`), its id (`id`), a regional code
+    (`pt-BR`) or `Auto`. It is sent as ElevenLabs' `language_code`, matched against the model's own language list, with
+    VoiceStudio's `jw`, `cmn-*`/Chinese and Kyrgyz mapped to ElevenLabs' `jv`, `zh` and `ky`. `Auto`, or no language,
+    sends `--language` when given and otherwise nothing, so ElevenLabs detects it. A language the model does not speak is a
+    400, as VoiceStudio refuses one its engine does not speak. `eleven_multilingual_v2` takes no `language_code`, so none
+    is sent on it.
+  - Every other VoiceStudio field (`instruct`, `ref_audio`, `guidance_scale`, `num_step` and the rest) is accepted and
+    ignored.
 - Errors come back as `{"detail": "..."}`. A rate-limited or failing ElevenLabs answers 429 or 503 with `Retry-After: 30`
   and `X-OmniVoice-Retryable: true`, VoiceStudio's busy answer. Any other ElevenLabs error is a 502.
 
